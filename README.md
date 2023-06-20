@@ -1,12 +1,12 @@
 # Dominion Divider Generation
 
-[![Build Status](https://travis-ci.org/sumpfork/dominiontabs.svg?branch=master)](https://travis-ci.org/sumpfork/dominiontabs)
+![Tests](https://github.com/sumpfork/dominiontabs/actions/workflows/lint_and_test.yml/badge.svg)
 
 ## Introduction
 
-This is a script and library to generate card dividers for storing cards for the game [Dominion](https://boardgamegeek.com/boardgame/36218/dominion). If you are just looking go generate some dominion dividers, there is no need to install this script as I host a [live version of this generator code](http://domtabs.sandflea.org). However, if you want to use arguments that I don't expose on that page, or change the code, or contribute to the project the full generation code (not the web interface or the fonts) is included here, and contributions are more than welcome.
+This is a script and library to generate card dividers for storing cards for the game [Dominion](https://boardgamegeek.com/boardgame/36218/dominion). If you are just looking go generate some dominion dividers, there is no need to install this script as I host a [live version of this generator code](http://domdiv.bgtools.net/). However, if you want to use arguments that I don't expose on that page, or change the code, or contribute to the project the full generation code (not the web interface or the fonts) is included here, and contributions are more than welcome.
 
-Again, to generate tabs go to the **[Online Generator](http://domtabs.sandflea.org)**.
+Again, to generate tabs go to the **[Online Generator](http://domdiv.bgtools.net/)**.
 
 ## Installation
 
@@ -18,23 +18,17 @@ The script has an extensive set of options that are relatively well documented v
 
 ## Translations
 
-If you would like to help with translations to new (or updating existing) languages, please see [instructions here](https://github.com/sumpfork/dominiontabs/blob/master/domdiv/card_db/translation.md).
+When changing any of the [card database files](card_db_src) you should run the language update tool via `doit update_languages`. This produces [the package version of the card db](src/domdiv/card_db) from the card db source. This will also be run automatically and checked into git when you push to github. You should make sure that the resulting changes to the package are what you intend by generating dividers in the relevant languages.
+
+If you would like to help with translations to new (or updating existing) languages, please see [instructions here](src/domdiv/card_db/translation.md).
 
 ## Fonts
 
-I believe I cannot distribute one font (Minion Pro) domdiv uses as they are owned by Adobe with a License that I understand to disallow redistribution.
+There are a number of fonts used in Dominion and many of them we cannot distribute with the package. We use fallbacks to commonly distributed fonts that work fine if you don't care the match the game exactly. If you do want to match, the script prints the preferred fonts if it uses fallbacks. Some come with programs like Adobe Reader and you can grab them from there.
 
-However, it appears you can download them here:
+Sadly, many of these fonts use features that are not support by the reportlab package. Thus, they need to first be converted to ttf (TrueType) format. I used the open source package fontforge to do the conversion. Included as 'tools/convert_font.ff' is a script for fontforge to do the conversion, on Mac OS X with fontforge installed through macports or homebrew you can just run commands like `./tools/convert_font.ff MinionPro-Regular.otf`.
 
-- http://fontsgeek.com/fonts/Minion-Pro-Regular
-- http://fontsgeek.com/fonts/Minion-Pro-Italic
-- http://fontsgeek.com/fonts/Minion-Pro-Bold
-
-Alternatively, the font files are included with every install of the free Adobe Reader. For example, on Windows 7 they are in C:\Program Files (x86)\Adobe\Reader 9.0\Resource\Font called `MinionPro-Regular.otf`, `MinionPro-Bold.otf` and `MinionPro-It.otf`.
-
-Sadly, all these fonts use features that are not support by the reportlab package. Thus, they need to first be converted to ttf (TrueType) format. I used the open source package fontforge to do the conversion. Included as 'convert.ff' is a script for fontforge to do the conversion, on Mac OS X with fontforge installed through macports or homebrew you can just run `./convert.ff MinionPro-Regular.otf`, `./convert.ff MinionPro-Bold.otf` and `./convert.ff MinionPro-It.otf`. With other fontforge installations, you'll need to change the first line of convert.ff to point to your fontforge executable. I have not done this step under Windows - I imagine it may be possible with a cygwin install of fontforge or some such method.
-
-Copy the converted `.ttf` files to the `fonts` directory in the `domdiv` package/directory, then perform the package install below.
+To supply fonts locally, put them in a directory and supply the relative path to it to the script via the `--font-dir` option. Alternatively you can copy the converted `.ttf` files to the `fonts` directory in the `domdiv` package/directory, then perform the package install below.
 
 ## Using as a library
 
@@ -47,3 +41,7 @@ Install requirements via `pip install -r requirements.txt`. Then, run `pre-commi
 Feel free to comment on boardgamegeek at <https://boardgamegeek.com/thread/926575/web-page-generate-tabbed-dividers> or file issues on github (<https://github.com/sumpfork/dominiontabs/issues>).
 
 Tests can be run (and their dependencies installed) via `python setup.py test`, which will also happen if/when you push a branch or make a PR.
+
+## Image Sources
+
+There is a separate [repo](https://github.com/sumpfork/dominiontabs_img_sources) for the image sources. While these are optional, they can be useful reference and/or used for creating new or recreating old tab banners, icons, etc. Many of these were originally scans of the physical game. Some of them have a lot of layers and are approaching 1GB in size, so they are hosted via [Git LFS](https://git-lfs.com/). As the Github version of that incurs a higher monthly cost, I instead host them on a private LFS server. If you would like the images or would like to contribute images let me know and I can make you an account on said server, or you I can copy them for you for easier access.

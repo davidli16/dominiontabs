@@ -1,14 +1,14 @@
 from __future__ import print_function
-import subprocess
-import shutil
-import os
+
 import contextlib
+import os
+import shutil
 import unicodedata
 
 import pytest
 
-from domdiv import main
 from domdiv import cards as domdiv_cards
+from domdiv import main
 
 
 @pytest.fixture
@@ -23,39 +23,55 @@ def rmtestcardb(request):
 
 
 def test_cardread():
-    cardsExpected = 574
+    num_cards_expected = 958
 
     options = main.parse_opts([])
     options.data_path = "."
     cards = main.read_card_data(options)
-    assert len(cards) == cardsExpected
+    assert len(cards) == num_cards_expected
     valid_cardsets = {
-        u"base",
-        u"dominion1stEdition",
-        u"dominion2ndEdition",
-        u"dominion2ndEditionUpgrade",
-        u"intrigue1stEdition",
-        u"intrigue2ndEdition",
-        u"intrigue2ndEditionUpgrade",
-        u"seaside",
-        u"alchemy",
-        u"prosperity",
-        u"cornucopia extras",
-        u"cornucopia",
-        u"hinterlands",
-        u"dark ages",
-        u"dark ages extras",
-        u"guilds",
-        u"adventures",
-        u"adventures extras",
-        u"empires",
-        u"empires extras",
-        u"nocturne",
-        u"nocturne extras",
-        u"promo",
-        u"renaissance",
-        u"extras",
-        u"animals",
+        "base",
+        "dominion1stEdition",
+        "dominion1stEditionRemoved",
+        "dominion2ndEdition",
+        "dominion2ndEditionUpgrade",
+        "intrigue1stEdition",
+        "intrigue1stEditionRemoved",
+        "intrigue2ndEdition",
+        "intrigue2ndEditionUpgrade",
+        "seaside1stEdition",
+        "seaside1stEditionRemoved",
+        "seaside2ndEdition",
+        "seaside2ndEditionUpgrade",
+        "alchemy",
+        "prosperity1stEdition",
+        "prosperity1stEditionRemoved",
+        "prosperity2ndEdition",
+        "prosperity2ndEditionUpgrade",
+        "cornucopia extras",
+        "cornucopia",
+        "hinterlands1stEdition",
+        "hinterlands1stEditionRemoved",
+        "hinterlands2ndEdition",
+        "hinterlands2ndEditionUpgrade",
+        "dark ages",
+        "dark ages extras",
+        "guilds",
+        "guilds-bigbox2-de",
+        "adventures",
+        "adventures extras",
+        "empires",
+        "empires extras",
+        "nocturne",
+        "nocturne extras",
+        "plunder",
+        "promo",
+        "promo-bigbox2-de",
+        "renaissance",
+        "menagerie",
+        "extras",
+        "animals",
+        "allies",
     }
     for c in cards:
         assert isinstance(c, domdiv_cards.Card)
@@ -73,24 +89,23 @@ def test_cardread():
     #      Curse:       +2 * 4 sets = +8
     #      Start Decks: +4 * 4 sets = +16
     #      Blanks:      +7          = +7
-    assert len(cards) == cardsExpected + 28
+    assert len(cards) == num_cards_expected + 28
 
 
-def test_languages():
-    languages = main.get_languages("card_db")
-    for lang in languages:
-        print("checking " + lang)
-        # for now, just test that they load
-        options = main.parse_opts(["--language", lang])
-        options.data_path = "."
-        cards = main.read_card_data(options)
-        assert cards, '"{}" cards did not read properly'.format(lang)
-        cards = main.add_card_text(cards, "en_us")
-        cards = main.add_card_text(cards, lang)
-        if lang == "it":
-            assert "Maledizione" in [card.name for card in cards]
-        elif lang == "de":
-            assert "Fluch" in [card.name for card in cards]
+@pytest.mark.parametrize("lang", main.get_languages("card_db"))
+def test_languages_db(lang):
+    print("checking " + lang)
+    # for now, just test that they load
+    options = main.parse_opts(["--language", lang])
+    options.data_path = "."
+    cards = main.read_card_data(options)
+    assert cards, '"{}" cards did not read properly'.format(lang)
+    cards = main.add_card_text(cards, "en_us")
+    cards = main.add_card_text(cards, lang)
+    if lang == "it":
+        assert "Maledizione" in [card.name for card in cards]
+    elif lang == "de":
+        assert "Fluch" in [card.name for card in cards]
 
 
 @contextlib.contextmanager
@@ -101,19 +116,6 @@ def change_cwd(d):
         yield
     finally:
         os.chdir(curdir)
-
-
-def test_languagetool_run(pytestconfig):
-    with change_cwd(str(pytestconfig.rootdir)):
-        cmd = "python tools/update_language.py"
-        print(cmd)
-        assert subprocess.check_call(cmd.split()) == 0
-        cmd = "diff -rwB src/domdiv/card_db tools/card_db"
-        try:
-            out = subprocess.check_output(cmd.split(), stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError as e:
-            assert e.output == ""
-        assert out.decode("utf-8") == ""
 
 
 def test_only_type():
@@ -140,6 +142,7 @@ def test_only_type():
     #      Blank:         +5 added in options
     #      Curse:         +1 from base
     #      Action Attack: +2 from Alchemy
+    print(cards)
     assert len(cards) == 8
 
 
@@ -198,8 +201,10 @@ def test_exclude_expansion():
     card_sets = set(x.cardset.lower() for x in cards)
     assert card_sets == {
         "adventures",
+        "dominion 1st edition removed",
         "dominion 2nd edition upgrade",
         "intrigue 1st edition",
+        "intrigue 1st edition removed",
     }
 
 
@@ -210,7 +215,7 @@ def test_expansion_description_card_order():
     options = main.parse_opts(
         [
             "--expansions",
-            "Hinterlands",
+            "hinterlands1stEdition",
             "--expansion-dividers",
             "--language",
             "fr",

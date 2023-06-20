@@ -1,21 +1,19 @@
-from __future__ import print_function, absolute_import
-
-import os
-import codecs
-import json
-import sys
-import argparse
 import copy
 import fnmatch
-import pkg_resources
+import functools
+import gzip
+import json
+import os
+import sys
 import unicodedata
 from collections import Counter, defaultdict
 
+import configargparse
+import pkg_resources
 import reportlab.lib.pagesizes as pagesizes
 from reportlab.lib.units import cm
 
-from .cards import Card
-from .cards import CardType
+from .cards import Card, CardType
 from .draw import DividerDrawer
 
 LOCATION_CHOICES = ["tab", "body-top", "hide"]
@@ -31,26 +29,35 @@ TAB_SIDE_CHOICES = [
     "full",
 ]
 TEXT_CHOICES = ["card", "rules", "blank"]
-LINE_CHOICES = ["line", "dot", "cropmarks", "dot-cropmarks"]
+LINE_CHOICES = ["line", "dot", "cropmarks", "line-cropmarks", "dot-cropmarks"]
 
-EDITION_CHOICES = ["1", "2", "latest", "all"]
+HEAD_CHOICES = ["tab", "strap", "cover", "none"]
+TAIL_CHOICES = ["tab", "strap", "cover", "folder", "none"]
+FACE_CHOICES = ["front", "back"]
+SPINE_CHOICES = ["name", "types", "tab", "blank"]
+
+EDITION_CHOICES = ["1", "2", "latest", "upgrade", "removed", "all"]
 
 ORDER_CHOICES = ["expansion", "global", "colour", "cost"]
 
+EXPANSION_GLOBAL_GROUP = "extras"
+EXPANSION_EXTRA_POSTFIX = " extras"
+
 LANGUAGE_DEFAULT = (
-    "en_us"
-)  # the primary language used if a language's parts are missing
+    "en_us"  # the primary language used if a language's parts are missing
+)
 LANGUAGE_XX = "xx"  # a dummy language for starting translations
 
 
-def get_languages(path):
+@functools.lru_cache()
+def get_languages(path="card_db"):
     languages = []
     for name in pkg_resources.resource_listdir("domdiv", path):
         dir_path = os.path.join(path, name)
         if pkg_resources.resource_isdir("domdiv", dir_path):
-            cards_file = os.path.join(dir_path, "cards_{}.json".format(name))
-            sets_file = os.path.join(dir_path, "sets_{}.json".format(name))
-            types_file = os.path.join(dir_path, "types_{}.json".format(name))
+            cards_file = os.path.join(dir_path, f"cards_{name}.json.gz")
+            sets_file = os.path.join(dir_path, f"sets_{name}.json.gz")
+            types_file = os.path.join(dir_path, f"types_{name}.json.gz")
             if (
                 pkg_resources.resource_exists("domdiv", cards_file)
                 and pkg_resources.resource_exists("domdiv", sets_file)
@@ -62,15 +69,15 @@ def get_languages(path):
     return languages
 
 
-LANGUAGE_CHOICES = get_languages("card_db")
-
-
 def get_resource_stream(path):
-    return codecs.EncodedFile(pkg_resources.resource_stream("domdiv", path), "utf-8")
+    return gzip.GzipFile(
+        fileobj=pkg_resources.resource_stream("domdiv", path),
+    )
 
 
+@functools.lru_cache()
 def get_expansions():
-    set_db_filepath = os.path.join("card_db", "sets_db.json")
+    set_db_filepath = os.path.join("card_db", "sets_db.json.gz")
     with get_resource_stream(set_db_filepath) as setfile:
         set_file = json.loads(setfile.read().decode("utf-8"))
     assert set_file, "Could not load any sets from database"
@@ -78,8 +85,8 @@ def get_expansions():
     fan = []
     official = []
     for s in set_file:
-        if "extras" not in s:
-            # Make sure this are set either True or False
+        if EXPANSION_EXTRA_POSTFIX not in s:
+            # Make sure these are set either True or False
             set_file[s]["fan"] = set_file[s].get("fan", False)
             if set_file[s]["fan"]:
                 fan.append(s)
@@ -90,15 +97,30 @@ def get_expansions():
     return official, fan
 
 
-EXPANSION_CHOICES, FAN_CHOICES = get_expansions()
+@functools.lru_cache()
+def get_global_groups():
+    type_db_filepath = os.path.join("card_db", "types_db.json.gz")
+    with get_resource_stream(type_db_filepath) as typefile:
+        type_file = json.loads(typefile.read().decode("utf-8"))
+    assert type_file, "Could not load any card types from database"
+
+    group_global_choices = []
+    group_global_valid = []
+    for t in type_file:
+        if "group_global_type" in t:
+            group_global_valid.append("-".join(t["card_type"]).lower())
+            group_global_choices.append(t["group_global_type"].lower())
+    group_global_valid.extend(group_global_choices)
+    group_global_valid.sort()
+    group_global_choices.sort()
+    return group_global_choices, group_global_valid
 
 
-def get_types(language="en_us"):
+@functools.lru_cache()
+def get_types(language=LANGUAGE_DEFAULT):
     # get a list of valid types
     language = language.lower()
-    type_text_filepath = os.path.join(
-        "card_db", language, "types_{}.json".format(language)
-    )
+    type_text_filepath = os.path.join("card_db", language, f"types_{language}.json.gz")
     with get_resource_stream(type_text_filepath) as type_text_file:
         type_text = json.loads(type_text_file.read().decode("utf-8"))
     assert type_text, "Could not load type file for %r" % language
@@ -108,23 +130,23 @@ def get_types(language="en_us"):
     return types
 
 
-TYPE_CHOICES = get_types(LANGUAGE_DEFAULT)
-
-
-# Load Label information
-LABEL_INFO = None
-LABEL_CHOICES = []
-LABEL_KEYS = []
-LABEL_SELECTIONS = []
-labels_db_filepath = os.path.join("card_db", "labels_db.json")
-with get_resource_stream(labels_db_filepath) as labelfile:
-    LABEL_INFO = json.loads(labelfile.read().decode("utf-8"))
-assert LABEL_INFO, "Could not load label information from database"
-for label in LABEL_INFO:
-    if len(label["names"]) > 0:
-        LABEL_KEYS.append(label["names"][0])
-        LABEL_SELECTIONS.append(label["name"] if "name" in label else label["names"][0])
-        LABEL_CHOICES.extend(label["names"])
+@functools.lru_cache()
+def get_label_data():
+    labels_db_filepath = os.path.join("card_db", "labels_db.json.gz")
+    label_choices = []
+    label_keys = []
+    label_selections = []
+    with get_resource_stream(labels_db_filepath) as labelfile:
+        label_info = json.loads(labelfile.read().decode("utf-8"))
+    assert label_info, "Could not load label information from database"
+    for label in label_info:
+        if len(label["names"]) > 0:
+            label_keys.append(label["names"][0])
+            label_selections.append(
+                label["name"] if "name" in label else label["names"][0]
+            )
+            label_choices.extend(label["names"])
+    return label_info, label_keys, label_selections, label_choices
 
 
 def add_opt(options, option, value):
@@ -133,8 +155,8 @@ def add_opt(options, option, value):
 
 
 def parse_opts(cmdline_args=None):
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    parser = configargparse.ArgParser(
+        formatter_class=configargparse.ArgumentDefaultsHelpFormatter,
         description="Generate Dominion Dividers",
         epilog="Source can be found at 'https://github.com/sumpfork/dominiontabs'. "
         "An online version can be found at 'http://domtabs.sandflea.org/'. ",
@@ -164,8 +186,12 @@ def parse_opts(cmdline_args=None):
         "-l",
         dest="language",
         default=LANGUAGE_DEFAULT,
-        choices=LANGUAGE_CHOICES,
+        choices=get_languages(),
         help="Language of divider text.",
+    )
+    group_basic.add_argument(
+        "--font-dir",
+        help="A directory path to scan for font files, preferring them over fonts in the domdiv package",
     )
     group_basic.add_argument(
         "--orientation",
@@ -178,7 +204,7 @@ def parse_opts(cmdline_args=None):
         "--size",
         dest="size",
         default="normal",
-        help="Dimentions of the cards to use with the dividers '<%%f>x<%%f>' (size in cm), "
+        help="Dimensions of the cards to use with the dividers '<%%f>x<%%f>' (size in cm), "
         "or 'normal' = '9.1x5.9', or 'sleeved' = '9.4x6.15'.",
     )
     group_basic.add_argument(
@@ -317,10 +343,39 @@ def parse_opts(cmdline_args=None):
         help="Don't show background artwork on tabs.",
     )
     group_tab.add_argument(
+        "--tab-artwork-opacity",
+        type=float,
+        default=1.0,
+        help="Multiply opacity of tab background art by this value; "
+        "can be used to make text show up clearer on dark backrounds, "
+        "particularly on printers that output darker than average",
+    )
+    group_tab.add_argument(
+        "--tab-artwork-resolution",
+        type=int,
+        default=0,
+        help="Limit the DPI resolution of tab background art.  "
+        "If nonzero, any higher-resolution images will be resized to "
+        "reduce output file size.",
+    )
+    group_tab.add_argument(
         "--use-text-set-icon",
         action="store_true",
         dest="use_text_set_icon",
         help="Use text/letters to represent a card's set instead of the set icon.",
+    )
+    group_tab.add_argument(
+        "--use-set-icon",
+        action="store_true",
+        dest="use_set_icon",
+        help="Use set icon instead of a card icon.  Applies to Promo cards.",
+    )
+    group_tab.add_argument(
+        "--expansion-reset-tabs",
+        action="store_true",
+        dest="expansion_reset_tabs",
+        help="When set, the tabs are restarted (left/right) at the beginning of each expansion. "
+        "If not set, the tab pattern will continue from one expansion to the next. ",
     )
 
     # Expanion Dividers
@@ -338,14 +393,13 @@ def parse_opts(cmdline_args=None):
         "--centre-expansion-dividers",
         action="store_true",
         dest="centre_expansion_dividers",
-        help="Centre the tabs on expansion dividers.",
+        help="Centre the tabs on expansion dividers (same width as dividers.)",
     )
     group_expansion.add_argument(
-        "--expansion-reset-tabs",
+        "--full-expansion-dividers",
         action="store_true",
-        dest="expansion_reset_tabs",
-        help="When set, the tabs are restarted (left/right) at the beginning of each expansion. "
-        "If not set, the tab pattern will continue from one expansion to the next. ",
+        dest="full_expansion_dividers",
+        help="Full width expansion dividers.",
     )
     group_expansion.add_argument(
         "--expansion-dividers-long-name",
@@ -366,7 +420,7 @@ def parse_opts(cmdline_args=None):
         action="append",
         dest="expansions",
         help="Limit dividers to only the specified expansions. "
-        "If no limits are set, then all expansions are included. "
+        "If no limits are set, then the latest expansions are included. "
         "Expansion names can also be given in the language specified by "
         "the --language parameter. Any expansion with a space in the name must "
         "be enclosed in double quotes. This may be called multiple times. "
@@ -375,7 +429,7 @@ def parse_opts(cmdline_args=None):
         "'[seq]' matches any character in seq, and '[!seq]' matches any character not in seq. "
         "For example, 'dominion*' will match all expansions that start with 'dominion'. "
         "Choices available in all languages include: {}".format(
-            ", ".join("%s" % x for x in EXPANSION_CHOICES)
+            ", ".join("%s" % x for x in get_expansions()[0])
         ),
     )
     group_select.add_argument(
@@ -392,7 +446,7 @@ def parse_opts(cmdline_args=None):
         "'*' any number of characters, '?' matches any single character, "
         "'[seq]' matches any character in seq, and '[!seq]' matches any character not in seq. "
         "Choices available in all languages include: {}".format(
-            ", ".join("%s" % x for x in FAN_CHOICES)
+            ", ".join("%s" % x for x in get_expansions()[1])
         ),
     )
     group_select.add_argument(
@@ -418,13 +472,15 @@ def parse_opts(cmdline_args=None):
         "--edition",
         choices=EDITION_CHOICES,
         dest="edition",
-        default="all",
         help="Editions to include: "
         "'1' is for all 1st Editions; "
         "'2' is for all 2nd Editions; "
+        "'upgrade' is for all upgrade cards for each expansion; "
+        "'removed' is for all removed cards for each expansion; "
         "'latest' is for the latest edition for each expansion; "
-        "'all' is for all editions of expansions; "
-        " This can be combined with other options to refine the expansions to include in the output.",
+        "'all' is for all editions of expansions, upgrade cards, and removed cards; "
+        " This can be combined with other options to refine the expansions to include in the output."
+        " (default: all)",
     )
     group_select.add_argument(
         "--upgrade-with-expansion",
@@ -440,10 +496,30 @@ def parse_opts(cmdline_args=None):
         "If this option is not given, all base cards are placed in their own 'Base' expansion.",
     )
     group_select.add_argument(
+        "--group-special",
         "--special-card-groups",
         action="store_true",
+        dest="group_special",
         help="Group cards that generally are used together "
         "(e.g., Shelters, Tournament and Prizes, Urchin/Mercenary, etc.).",
+    )
+    group_select.add_argument(
+        "--group-kingdom",
+        action="store_true",
+        dest="group_kingdom",
+        help="Group cards that have randomizers into the expansion, "
+        "and those that don't have randomizers into the expansion's 'Extra' section.",
+    )
+    group_select.add_argument(
+        "--group-global",
+        nargs="*",
+        action="append",
+        dest="group_global",
+        help="Group all cards of the specified types across all expansions into one 'Extras' divider. "
+        "This may be called multiple times. Values are not case sensitive. "
+        "Choices available include: {}".format(
+            ", ".join("%s" % x for x in get_global_groups()[1])
+        ),
     )
     group_select.add_argument(
         "--no-trash",
@@ -472,12 +548,32 @@ def parse_opts(cmdline_args=None):
     group_select.add_argument(
         "--exclude-events",
         action="store_true",
-        help="Group all 'Event' cards across all expansions into one divider.",
+        help="Group all 'Event' cards across all expansions into one divider."
+        "Same as '--group-global Events'",
     )
     group_select.add_argument(
         "--exclude-landmarks",
         action="store_true",
-        help="Group all 'Landmark' cards across all expansions into one divider.",
+        help="Group all 'Landmark' cards across all expansions into one divider."
+        "Same as '--group-global landmarks'",
+    )
+    group_select.add_argument(
+        "--exclude-projects",
+        action="store_true",
+        help="Group all 'Project' cards across all expansions into one divider."
+        "Same as '--group-global projects'",
+    )
+    group_select.add_argument(
+        "--exclude-ways",
+        action="store_true",
+        help="Group all 'Way' cards across all expansions into one divider."
+        "Same as '--group-global ways'",
+    )
+    group_select.add_argument(
+        "--exclude-traits",
+        action="store_true",
+        help="Group all 'Trait' cards across all expansions into one divider."
+        "Same as '--group-global traits'",
     )
     group_select.add_argument(
         "--only-type-any",
@@ -492,7 +588,7 @@ def parse_opts(cmdline_args=None):
         "Any type with a space in the name must be enclosed in double quotes. "
         "Values are not case sensitive. "
         "Choices available in all languages include: {}".format(
-            ", ".join("%s" % x for x in TYPE_CHOICES)
+            ", ".join("%s" % x for x in get_types())
         ),
     )
     group_select.add_argument(
@@ -506,7 +602,7 @@ def parse_opts(cmdline_args=None):
         "Any type with a space in the name must be enclosed in double quotes. "
         "Values are not case sensitive. "
         "Choices available in all languages include: {}".format(
-            ", ".join("%s" % x for x in TYPE_CHOICES)
+            ", ".join("%s" % x for x in get_types())
         ),
     )
 
@@ -517,8 +613,117 @@ def parse_opts(cmdline_args=None):
     group_wrapper.add_argument(
         "--wrapper",
         action="store_true",
-        dest="wrapper",
-        help="Draw sleeves (aka wrapper) for the cards instead of a divider for the cards.",
+        dest="wrapper_meta",
+        help="Draw sleeves (wrappers) instead of dividers for the cards. "
+        "Same as --head=strap --tail=folder",
+    )
+    group_wrapper.add_argument(
+        "--pull-tab",
+        action="store_true",
+        dest="pull_tab_meta",
+        help="Draw folding pull tabs instead of dividers for the cards. "
+        "Same as --head=tab --tail=cover",
+    )
+    group_wrapper.add_argument(
+        "--tent",
+        action="store_true",
+        dest="tent_meta",
+        help="Draw folding tent covers instead of dividers for the cards. "
+        "Same as --head=cover --head-facing=back --head-text=back "
+        "--tail=tab --tail-facing=front",
+    )
+    group_wrapper.add_argument(
+        "--head",
+        choices=HEAD_CHOICES,
+        dest="head",
+        default="tab",
+        help="Top tab or wrapper type: "
+        "'tab' for divider tabs, "
+        "'strap' for longer folding tabs, "
+        "'cover' for matchbook-style folding covers, "
+        "or 'none' to leave the top edge plain. "
+        "The folding options create a top spine that you can customize "
+        "with --spine.",
+    )
+    group_wrapper.add_argument(
+        "--tail",
+        choices=TAIL_CHOICES,
+        dest="tail",
+        default="none",
+        help="Bottom tab or wrapper type: "
+        "'tab' for a bottom tab banner, "
+        "'strap' for a pull tab under the cards, "
+        "'cover' for a simple back cover, "
+        "'folder' to create tab folders, "
+        "or 'none' to leave the bottom edge plain.",
+    )
+    group_wrapper.add_argument(
+        "--head-facing",
+        choices=FACE_CHOICES,
+        dest="head_facing",
+        default="front",
+        help="Text orientation for top tabs and wrappers: "
+        "'front' shows the text upright when flat, "
+        "'back' shows it upright when folded over.",
+    )
+    group_wrapper.add_argument(
+        "--tail-facing",
+        choices=FACE_CHOICES,
+        dest="tail_facing",
+        default="back",
+        help="Text orientation for tail wrappers: "
+        "'front' shows the text upright when flat, "
+        "'back' shows it upright when folded under.",
+    )
+    group_wrapper.add_argument(
+        "--head-text",
+        choices=TEXT_CHOICES + FACE_CHOICES,
+        dest="head_text",
+        default="blank",
+        help="Text to print on top cover panels: "
+        "'card' shows the text from the game card, "
+        "'rules' shows additional rules for the game card, "
+        "'blank' leaves the panel blank; "
+        "'front' uses the same setting as --front; "
+        "'back' uses the same setting as --back.",
+    )
+    group_wrapper.add_argument(
+        "--tail-text",
+        choices=TEXT_CHOICES + FACE_CHOICES,
+        dest="tail_text",
+        default="back",
+        help="Text to print on bottom folder panels: "
+        "'card' shows the text from the game card, "
+        "'rules' shows additional rules for the game card, "
+        "'blank' leaves the panel blank; "
+        "'front' uses the same setting as --front; "
+        "'back' uses the same setting as --back.",
+    )
+    group_wrapper.add_argument(
+        "--head-height",
+        type=float,
+        default=0.0,
+        help="Height of the top panel in centimeters "
+        "(a value of 0 uses tab height or card height as appropriate).",
+    )
+    group_wrapper.add_argument(
+        "--tail-height",
+        type=float,
+        default=0.0,
+        help="Height of the bottom panel in centimeters "
+        "(a value of 0 uses tab height or card height as appropriate).",
+    )
+    group_wrapper.add_argument(
+        "--spine",
+        choices=SPINE_CHOICES,
+        dest="spine",
+        default="name",
+        help="Text to print on the spine of top covers: "
+        "'name' prints the card name; "
+        "'type' prints the card type; "
+        "'tab' prints tab text and graphics; "
+        "'blank' leaves the spine blank. "
+        "This is only valid with folding --head options.",
     )
     group_wrapper.add_argument(
         "--thickness",
@@ -526,7 +731,7 @@ def parse_opts(cmdline_args=None):
         default=2.0,
         help="Thickness of a stack of 60 cards (Copper) in centimeters. "
         "Typically unsleeved cards are 2.0, thin sleeved cards are 2.4, and thick sleeved cards are 3.2. "
-        "This is only valid with the --wrapper option.",
+        "This is only valid with --wrapper or other folding options.",
     )
     group_wrapper.add_argument(
         "--sleeved-thick",
@@ -541,19 +746,24 @@ def parse_opts(cmdline_args=None):
         help="Same as --size=sleeved --thickness 2.4.",
     )
     group_wrapper.add_argument(
-        "--notch-length",
-        type=float,
-        default=0.0,
-        help="Length of thumb notch on wrapper in centimeters "
-        "(a value of 0.0 means no notch on wrapper). "
-        "This can make it easier to remove the actual cards from the wrapper. "
-        "This is only valid with the --wrapper option.",
-    )
-    group_wrapper.add_argument(
         "--notch",
         action="store_true",
         dest="notch",
-        help="Same as --notch_length thickness 1.5.",
+        help="Creates thumb notches opposite to the divider tabs, "
+        "which can make it easier to remove cards from wrappers or stacks. "
+        "Equivalent to --notch-length=1.5 --notch-height=0.25",
+    )
+    group_wrapper.add_argument(
+        "--notch-length",
+        type=float,
+        default=0.0,
+        help="Sets the length of thumb notches in centimeters.",
+    )
+    group_wrapper.add_argument(
+        "--notch-height",
+        type=float,
+        default=0.0,
+        help="Sets the height of thumb notches in centimeters.",
     )
 
     # Printing
@@ -577,6 +787,20 @@ def parse_opts(cmdline_args=None):
         type=float,
         default=0.1,
         help="Width of lines for card outlines and crop marks.",
+    )
+    group_printing.add_argument(
+        "--front-offset",
+        type=float,
+        dest="front_offset",
+        default=0,
+        help="Front page horizontal offset points to shift to the right. Only needed for some printers.",
+    )
+    group_printing.add_argument(
+        "--front-offset-height",
+        type=float,
+        dest="front_offset_height",
+        default=0,
+        help="Front page vertical offset points to shift upward. Only needed for some printers.",
     )
     group_printing.add_argument(
         "--back-offset",
@@ -637,6 +861,7 @@ def parse_opts(cmdline_args=None):
         "'line' will print a solid line outlining the divider; "
         "'dot' will print a dot at each corner of the divider; "
         "'cropmarks' will print cropmarks for the divider; "
+        "'line-cropmarks' will combine 'line' and 'cropmarks'; "
         "'dot-cropmarks' will combine 'dot' and 'cropmarks'",
     )
     group_printing.add_argument(
@@ -662,7 +887,7 @@ def parse_opts(cmdline_args=None):
     group_printing.add_argument(
         "--label",
         dest="label_name",
-        choices=LABEL_CHOICES,
+        choices=get_label_data()[3],
         default=None,
         help="Use preset label dimentions. Specify a label name. "
         "This will override settings that conflict with the preset label settings.",
@@ -697,13 +922,21 @@ def parse_opts(cmdline_args=None):
     group_special.add_argument(
         "--cardlist",
         dest="cardlist",
-        help="Path to file that enumerates each card to be printed on its own line.",
+        help="Path to file that enumerates each card on its own line to be included or excluded."
+        " To include a card, add its card name on a line.  The name can optionally be preceeded by '+'."
+        " To exclude a card, add its card name on a line preseeded by a '-'"
+        " If any card is included by this method, only cards specified in this file will be printed.",
     )
     group_special.add_argument(
-        "--write-json",
-        action="store_true",
-        dest="write_json",
-        help="Write json version of card definitions and extras.",
+        "-c",
+        is_config_file=True,
+        help="Use the specified configuration file to provide options. "
+        "Command line options override options from this file.",
+    )
+    group_special.add_argument(
+        "-w",
+        is_write_out_config_file_arg=True,
+        help="Write out the given options to the specified configuration file.",
     )
 
     options = parser.parse_args(args=cmdline_args)
@@ -714,7 +947,6 @@ def parse_opts(cmdline_args=None):
 
 
 def clean_opts(options):
-
     if "center" in options.tab_side:
         options.tab_side = str(options.tab_side).replace("center", "centre")
 
@@ -747,8 +979,8 @@ def clean_opts(options):
                 "** Warning: --tab-side with 'flip' implies 2 tabs. Setting --tab-number to 2 **"
             )
         options.tab_number = (
-            2
-        )  # alternating left and right with a flip, so override tab_number
+            2  # alternating left and right with a flip, so override tab_number
+        )
         options.flip = True
     else:
         options.flip = False
@@ -771,25 +1003,24 @@ def clean_opts(options):
         options.thickness = 2.4
         options.sleeved = True
 
-    if options.notch:
+    # if notch is enabled with missing dimensions, provide defaults
+    notch = options.notch or options.notch_length or options.notch_height
+    if notch and not options.notch_length:
         options.notch_length = 1.5
-
-    if options.notch_length > 0:
-        options.notch_height = 0.25  # thumb notch height
+    if notch and not options.notch_height:
+        options.notch_height = 0.25
 
     if options.cropmarks and options.linetype == "line":
         options.linetype = "cropmarks"
 
-    if options.linetype == "cropmarks":
-        options.cropmarks = True
-
-    if options.linetype == "dot-cropmarks":
-        options.linetype = "dot"
+    if "cropmarks" in options.linetype:
         options.cropmarks = True
 
     if options.expansions is None:
-        # No instance given, so default to all Official expansions
+        # No instance given, so default to the latest Official expansions
         options.expansions = ["*"]
+        if options.edition is None:
+            options.edition = "latest"
     else:
         # options.expansions is a list of lists.  Reduce to single lowercase list
         options.expansions = [
@@ -804,6 +1035,10 @@ def clean_opts(options):
         options.exclude_expansions = [
             item.lower() for sublist in options.exclude_expansions for item in sublist
         ]
+
+    if options.edition is None:
+        # set the default
+        options.edition = "all"
 
     if options.fan is None:
         # No instance given, so default to no Fan expansions
@@ -833,13 +1068,37 @@ def clean_opts(options):
             set([item.lower() for sublist in options.only_type_all for item in sublist])
         )
 
+    if options.group_global is None:
+        options.group_global = []
+    elif not any(options.group_global):
+        # option given with nothing indicates all possible global groupings
+        options.group_global = get_global_groups()[1]
+    else:
+        # options.group_global is a list of lists.  Reduce to single lowercase list
+        options.group_global = [
+            item.lower() for sublist in options.group_global for item in sublist
+        ]
+    # For backwards compatibility
+    if options.exclude_events:
+        options.group_global.append("events")
+    if options.exclude_landmarks:
+        options.group_global.append("landmarks")
+    if options.exclude_projects:
+        options.group_global.append("projects")
+    if options.exclude_ways:
+        options.group_global.append("ways")
+    if options.exclude_traits:
+        options.group_global.append("traits")
+    # Remove duplicates from the list
+    options.group_global = list(set(options.group_global))
+
     if options.tabs_only and options.label_name is None:
         # default is Avery 8867
         options.label_name = "8867"
 
     options.label = None
     if options.label_name is not None:
-        for label in LABEL_INFO:
+        for label in get_label_data()[0]:
             if options.label_name.upper() in [n.upper() for n in label["names"]]:
                 options.label = label
                 break
@@ -881,7 +1140,9 @@ def clean_opts(options):
 
         options.linewidth = 0.0
         options.cropmarks = False
-        options.wrapper = False
+        options.head = "tab"
+        options.tail = "none"
+        options.wrapper_meta = options.pull_tab_meta = options.tent_meta = False
         options.papersize = label["paper"]
         if label["tab-only"]:
             options.tabs_only = True
@@ -902,6 +1163,37 @@ def clean_opts(options):
             options.tab_side = "full"
         options.label = label
 
+    if options.wrapper_meta:
+        # Same as --head=strap --tail=folder
+        options.head = "strap"
+        options.tail = "folder"
+    if options.pull_tab_meta:
+        # Same as --head=tab --tail=cover
+        options.head = "tab"
+        options.tail = "cover"
+    if options.tent_meta:
+        # Same as --head=cover --head-facing=back --head-text=back
+        #         --tail=tab --tail-facing=front
+        options.head = "cover"
+        options.head_facing = "back"
+        options.head_text = "back"
+        options.tail = "tab"
+        options.tail_facing = "front"
+    # Flags set if there's a head wrapper, a tail wrapper, or either
+    options.headWrapper = options.head in ["strap", "cover", "folder"]
+    options.tailWrapper = options.tail in ["strap", "cover", "folder"]
+    options.wrapper = options.headWrapper or options.tailWrapper
+
+    # Expand --head-text and --tail-text if they refer to --front or --back
+    if options.head_text == "front":
+        options.head_text = options.text_front
+    elif options.head_text == "back":
+        options.head_text = options.text_back
+    if options.tail_text == "front":
+        options.tail_text = options.text_front
+    elif options.tail_text == "back":
+        options.tail_text = options.text_back
+
     return options
 
 
@@ -912,6 +1204,7 @@ def parseDimensions(dimensionsStr):
 
 def generate_sample(options):
     from io import BytesIO
+
     from wand.image import Image
 
     buf = BytesIO()
@@ -984,7 +1277,11 @@ def parse_cardsize(spec, sleeved):
     return dominionCardWidth, dominionCardHeight
 
 
-def find_index_of_object(lst=[], attributes={}):
+def find_index_of_object(lst=None, attributes=None):
+    if lst is None:
+        lst = []
+    if attributes is None:
+        attributes = {}
     # Returns the index of the first object in lst that matches the given attributes.  Otherwise returns None.
     # attributes is a dict of key: value pairs.   Object attributes that are lists are checked to have value in them.
     for i, d in enumerate(lst):
@@ -1011,9 +1308,8 @@ def find_index_of_object(lst=[], attributes={}):
 
 
 def read_card_data(options):
-
     # Read in the card types
-    types_db_filepath = os.path.join("card_db", "types_db.json")
+    types_db_filepath = os.path.join("card_db", "types_db.json.gz")
     with get_resource_stream(types_db_filepath) as typefile:
         Card.types = json.loads(
             typefile.read().decode("utf-8"), object_hook=CardType.decode_json
@@ -1033,21 +1329,33 @@ def read_card_data(options):
     Card.types = dict(((c.getTypeNames(), c) for c in Card.types))
 
     # Read in the card database
-    card_db_filepath = os.path.join("card_db", "cards_db.json")
+    card_db_filepath = os.path.join("card_db", "cards_db.json.gz")
     with get_resource_stream(card_db_filepath) as cardfile:
         cards = json.loads(
             cardfile.read().decode("utf-8"), object_hook=Card.decode_json
         )
     assert cards, "Could not load any cards from database"
 
-    set_db_filepath = os.path.join("card_db", "sets_db.json")
+    set_db_filepath = os.path.join("card_db", "sets_db.json.gz")
     with get_resource_stream(set_db_filepath) as setfile:
         Card.sets = json.loads(setfile.read().decode("utf-8"))
     assert Card.sets, "Could not load any sets from database"
+    new_sets = {}
     for s in Card.sets:
         # Make sure these are set either True or False
         Card.sets[s]["no_randomizer"] = Card.sets[s].get("no_randomizer", False)
         Card.sets[s]["fan"] = Card.sets[s].get("fan", False)
+        Card.sets[s]["has_extras"] = Card.sets[s].get("has_extras", True)
+        Card.sets[s]["upgrades"] = Card.sets[s].get("upgrades", None)
+        new_sets[s] = Card.sets[s]
+        # Make an "Extras" set for normal expansions
+        if Card.sets[s]["has_extras"]:
+            e = s + EXPANSION_EXTRA_POSTFIX
+            new_sets[e] = copy.deepcopy(Card.sets[s])
+            new_sets[e]["set_name"] = "*" + s + EXPANSION_EXTRA_POSTFIX + "*"
+            new_sets[e]["no_randomizer"] = True
+            new_sets[e]["has_extras"] = False
+    Card.sets = new_sets
 
     # Remove the Trash card. Do early before propagating to various sets.
     if options.no_trash:
@@ -1075,12 +1383,12 @@ def read_card_data(options):
 
     # Add any blank cards
     if options.include_blanks > 0:
-        for x in range(0, options.include_blanks):
+        for _ in range(0, options.include_blanks):
             c = Card(
-                card_tag=u"Blank",
-                cardset="extras",
-                cardset_tag="extras",
-                cardset_tags=["extras"],
+                card_tag="Blank",
+                cardset=EXPANSION_GLOBAL_GROUP,
+                cardset_tag=EXPANSION_GLOBAL_GROUP,
+                cardset_tags=[EXPANSION_GLOBAL_GROUP],
                 randomizer=False,
                 types=("Blank",),
             )
@@ -1225,7 +1533,7 @@ class CardSorter(object):
         return (
             card.cardset,
             int(card.isExpansion()),
-            card.get_total_cost(card),
+            str(card.get_total_cost(card)),
             self.strip_accents(card.name),
         )
 
@@ -1245,7 +1553,7 @@ def add_card_text(cards, language="en_us"):
     language = language.lower()
     # Read in the card text file
     card_text_filepath = os.path.join(
-        "card_db", language, "cards_" + language.lower() + ".json"
+        "card_db", language, "cards_" + language.lower() + ".json.gz"
     )
     with get_resource_stream(card_text_filepath) as card_text_file:
         card_text = json.loads(card_text_file.read().decode("utf-8"))
@@ -1266,9 +1574,7 @@ def add_card_text(cards, language="en_us"):
 def add_set_text(options, sets, language="en_us"):
     language = language.lower()
     # Read in the set text and store for later
-    set_text_filepath = os.path.join(
-        "card_db", language, "sets_{}.json".format(language)
-    )
+    set_text_filepath = os.path.join("card_db", language, f"sets_{language}.json.gz")
     with get_resource_stream(set_text_filepath) as set_text_file:
         set_text = json.loads(set_text_file.read().decode("utf-8"))
     assert set_text, "Could not load set text for %r" % language
@@ -1281,12 +1587,12 @@ def add_set_text(options, sets, language="en_us"):
     return sets
 
 
-def add_type_text(types={}, language="en_us"):
+def add_type_text(types=None, language="en_us"):
+    if types is None:
+        types = {}
     language = language.lower()
     # Read in the type text and store for later
-    type_text_filepath = os.path.join(
-        "card_db", language, "types_{}.json".format(language)
-    )
+    type_text_filepath = os.path.join("card_db", language, f"types_{language}.json.gz")
     with get_resource_stream(type_text_filepath) as type_text_file:
         type_text = json.loads(type_text_file.read().decode("utf-8"))
     assert type_text, "Could not load type text for %r" % language
@@ -1309,7 +1615,7 @@ def add_bonus_regex(options, language="en_us"):
     language = language.lower()
     # Read in the bonus regex terms
     bonus_regex_filepath = os.path.join(
-        "card_db", language, "bonuses_{}.json".format(language)
+        "card_db", language, f"bonuses_{language}.json.gz"
     )
     with get_resource_stream(bonus_regex_filepath) as bonus_regex_file:
         bonus_regex = json.loads(bonus_regex_file.read().decode("utf-8"))
@@ -1322,7 +1628,6 @@ def add_bonus_regex(options, language="en_us"):
 
 
 def combine_cards(cards, old_card_type, new_card_tag, new_cardset_tag, new_type):
-
     holder = Card(
         name="*Replace Later*",
         card_tag=new_card_tag,
@@ -1347,7 +1652,6 @@ def combine_cards(cards, old_card_type, new_card_tag, new_cardset_tag, new_type)
 
 
 def filter_sort_cards(cards, options):
-
     # Filter out cards by edition
     if options.edition and options.edition != "all":
         keep_sets = []
@@ -1365,49 +1669,48 @@ def filter_sort_cards(cards, options):
 
     # Combine upgrade cards with their expansion
     if options.upgrade_with_expansion:
+        if options.exclude_expansions is None:
+            options.exclude_expansions = []
         for card in cards:
-            if card.cardset_tag == "dominion2ndEditionUpgrade":
-                card.cardset_tag = "dominion1stEdition"
-                options.expansions.append(card.cardset_tag.lower())
-            elif card.cardset_tag == "intrigue2ndEditionUpgrade":
-                card.cardset_tag = "intrigue1stEdition"
-                options.expansions.append(card.cardset_tag.lower())
+            if Card.sets[card.cardset_tag]["upgrades"]:
+                options.exclude_expansions.append(card.cardset_tag.lower())
+                card.cardset_tag = Card.sets[card.cardset_tag]["upgrades"]
 
-    # Combine all Events across all expansions
-    if options.exclude_events:
-        cards = combine_cards(
-            cards,
-            old_card_type="Event",
-            new_type="Events",
-            new_card_tag="events",
-            new_cardset_tag="extras",
-        )
-        if options.expansions:
-            options.expansions.append("extras")
+    # Combine globally all cards of the given types
+    # For example, Events, Landmarks, Projects, Ways, Traits
+    if options.group_global:
+        # First find all possible types to group that match options.group_global
+        types_to_group = {}
+        for t in Card.types:
+            group_global_type = Card.types[t].getGroupGlobalType()
+            if group_global_type:
+                theType = "-".join(t)
+                # Save if either the old or the new type matches the option
+                # Remember options.global_group is already lowercase
+                if theType.lower() in options.group_global:
+                    types_to_group[theType] = group_global_type
+                elif group_global_type.lower() in options.group_global:
+                    types_to_group[theType] = group_global_type
 
-    # Combine all Landmarks across all expansions
-    if options.exclude_landmarks:
-        cards = combine_cards(
-            cards,
-            old_card_type="Landmark",
-            new_type="Landmarks",
-            new_card_tag="landmarks",
-            new_cardset_tag="extras",
-        )
+        # Now work through the matching types to group
+        for t in types_to_group:
+            cards = combine_cards(
+                cards,
+                old_card_type=t,
+                new_type=types_to_group[t],
+                new_card_tag=types_to_group[t].lower(),
+                new_cardset_tag=EXPANSION_GLOBAL_GROUP,
+            )
         if options.expansions:
-            options.expansions.append("extras")
+            options.expansions.append(EXPANSION_GLOBAL_GROUP)
 
     # Take care of any blank cards
     if options.include_blanks > 0:
         if options.expansions:
-            options.expansions.append("extras")
-
-    # FIX THIS: Combine all Prizes across all expansions
-    # if options.exclude_prizes:
-    #    cards = combine_cards(cards, 'Prize', 'prizes')
+            options.expansions.append(EXPANSION_GLOBAL_GROUP)
 
     # Group all the special cards together
-    if options.special_card_groups:
+    if options.group_special:
         keep_cards = []  # holds the cards that are to be kept
         group_cards = {}  # holds the cards for each group
         for card in cards:
@@ -1430,10 +1733,8 @@ def filter_sort_cards(cards, options):
                     )  # For now, change the name to the group_tab
                     card.description = error_msg
                     card.extra = error_msg
-                    if card.isType("Event") or card.isType("Project"):
-                        card.cost = "*"
-                    if card.isType("Landmark"):
-                        card.cost = ""
+                    if card.get_GroupCost():
+                        card.cost = card.get_GroupCost()
                     # now save the card
                     keep_cards.append(card)
                 else:
@@ -1454,26 +1755,24 @@ def filter_sort_cards(cards, options):
 
         cards = keep_cards
 
-        # Now fix up card costs
+        # Now fix up card costs for groups by Type (Events, Landmarks, etc.)
         for card in cards:
-            if card.card_tag in group_cards:
-                if group_cards[card.group_tag].isType("Event") or group_cards[
+            if (
+                card.card_tag in group_cards
+                and group_cards[card.group_tag].get_GroupCost()
+            ):
+                group_cards[card.group_tag].cost = group_cards[
                     card.group_tag
-                ].isType("Project"):
-                    group_cards[card.group_tag].cost = "*"
-                    group_cards[card.group_tag].debtcost = 0
-                    group_cards[card.group_tag].potcost = 0
-                if group_cards[card.group_tag].isType("Landmark"):
-                    group_cards[card.group_tag].cost = ""
-                    group_cards[card.group_tag].debtcost = 0
-                    group_cards[card.group_tag].potcost = 0
+                ].get_GroupCost()
+                group_cards[card.group_tag].debtcost = 0
+                group_cards[card.group_tag].potcost = 0
 
     # Get the final type names in the requested language
     Card.type_names = add_type_text(Card.type_names, LANGUAGE_DEFAULT)
     if options.language != LANGUAGE_DEFAULT:
         Card.type_names = add_type_text(Card.type_names, options.language)
     for card in cards:
-        card.types_name = " - ".join([Card.type_names[t] for t in card.types]).upper()
+        card.types_name = " - ".join([Card.type_names[t] for t in card.types])
 
     # Get the card bonus keywords in the requested language
     bonus = add_bonus_regex(options, LANGUAGE_DEFAULT)
@@ -1522,7 +1821,9 @@ def filter_sort_cards(cards, options):
                 expanded_expansions.append(e)
 
         # Now get the actual sets that are matched above
-        options.expansions = set([e for e in expanded_expansions])  # Remove duplicates
+        options.expansions = set(
+            [e.lower() for e in expanded_expansions]
+        )  # Remove duplicates
         knownExpansions = set()
         for e in options.expansions:
             for s in Official_sets:
@@ -1554,7 +1855,7 @@ def filter_sort_cards(cards, options):
                 expanded_expansions.append(e)
 
         # Now get the actual sets that are matched above
-        options.fan = set([e for e in expanded_expansions])  # Remove duplicates
+        options.fan = set([e.lower() for e in expanded_expansions])  # Remove duplicates
         knownExpansions = set()
         for e in options.fan:
             for s in Fan_sets:
@@ -1564,7 +1865,13 @@ def filter_sort_cards(cards, options):
         # Give indication if an imput did not match anything
         unknownExpansions = options.fan - knownExpansions
         if unknownExpansions:
-            print("Error - unknown fan expansion(s): %s" % ", ".join(unknownExpansions))
+            print(
+                (
+                    "Error - unknown expansion(s): {}".format(
+                        ", ".join(unknownExpansions)
+                    )
+                )
+            )
 
     if options.exclude_expansions:
         # Expand out any wildcards, matching set key or set name in the given language
@@ -1598,22 +1905,33 @@ def filter_sort_cards(cards, options):
     keep_cards = []
     for c in cards:
         if c.cardset_tag in wantedSets:
+            if options.group_kingdom:
+                # Separate non-Kingdom cards (without Randomizer) into new "Extras" set
+                if not c.randomizer and Card.sets[c.cardset_tag]["has_extras"]:
+                    c.cardset_tag += EXPANSION_EXTRA_POSTFIX
             # Add the cardset informaiton to the card and add it to the list of cards to use
             c.cardset = Card.sets[c.cardset_tag].get("set_name", c.cardset_tag)
             keep_cards.append(c)
     cards = keep_cards
 
     # Now add text to the cards.  Waited as long as possible to catch all groupings
-    cards = add_card_text(cards, LANGUAGE_DEFAULT)
-    if options.language != LANGUAGE_DEFAULT:
-        cards = add_card_text(cards, options.language)
+    cards = add_card_text(cards, options.language)
 
     # Get list of cards from a file
     if options.cardlist:
         cardlist = set()
+        cardlist_exclude = set()
         with open(options.cardlist) as cardfile:
             for line in cardfile:
-                cardlist.add(line.strip())
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    pass  # ignore empty and "comment" lines
+                elif line.startswith("-"):
+                    cardlist_exclude.add(line.lstrip("- \t"))
+                else:
+                    cardlist.add(line.lstrip("+ \t"))
+        if cardlist_exclude:
+            cards = [card for card in cards if card.name not in cardlist_exclude]
         if cardlist:
             cards = [card for card in cards if card.name in cardlist]
 
@@ -1633,11 +1951,13 @@ def filter_sort_cards(cards, options):
 
     # Add expansion divider
     if options.expansion_dividers:
-
         cardnamesByExpansion = defaultdict(dict)
         randomizerCountByExpansion = Counter()
         for c in cards:
-            if cardSorter.isBaseExpansionCard(c) or c.isBlank():
+            if c.isBlank() or (
+                cardSorter.isBaseExpansionCard(c)
+                and not options.base_cards_with_expansion
+            ):
                 continue
             if c.randomizer:
                 randomizerCountByExpansion[c.cardset] += 1
@@ -1684,7 +2004,7 @@ def filter_sort_cards(cards, options):
                     if n["count"] > 1:
                         # Add number of copies
                         n["name"] = (
-                            u"{}&nbsp;\u00d7&nbsp;".format(n["count"]) + n["name"]
+                            "{}&nbsp;\u00d7&nbsp;".format(n["count"]) + n["name"]
                         )
                     card_names.append(n["name"])
 
@@ -1756,7 +2076,9 @@ def filter_sort_cards(cards, options):
     return cards
 
 
-def calculate_layout(options, cards=[]):
+def calculate_layout(options, cards=None):
+    if cards is None:
+        cards = []
     # This is in place to allow for test cases to it call directly to get
     options = clean_opts(options)
     options.dominionCardWidth, options.dominionCardHeight = parse_cardsize(
@@ -1771,7 +2093,6 @@ def calculate_layout(options, cards=[]):
 
 
 def generate(options):
-
     cards = read_card_data(options)
     assert cards, "No cards after reading"
     cards = filter_sort_cards(cards, options)
