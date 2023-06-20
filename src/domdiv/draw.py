@@ -408,6 +408,7 @@ class Plotter(object):
         x, y = self.getXY()  # get current point
         new_x = x + delta_x  # calculate new point from delta
         new_y = y + delta_y
+        self.canvas.setStrokeGray(0)
         if pen == self.LINE:
             self.canvas.line(x, y, new_x, new_y)
         if pen == self.DOT:
@@ -1236,7 +1237,7 @@ class DividerDrawer(object):
             if setImage and "tab" in self.options.set_icon:
                 setImageHeight = 3 + card.getType().getTabTextHeightOffset()
 
-                self.drawSetIcon(setImage, item.tabWidth - 20, setImageHeight)
+                self.drawSetIcon(setImage, item.cardWidth - 20, setImageHeight + 4)
 
                 textInsetRight = 20
 
@@ -1248,26 +1249,10 @@ class DividerDrawer(object):
         textWidth -= textInsetRight
 
         width = self.nameWidth(name, fontSize)
-        while width > textWidth and fontSize > 8:
-            fontSize -= 0.01
-            width = self.nameWidth(name, fontSize)
-        tooLong = width > textWidth
-        if tooLong:
-            name_lines = name.partition(" / ")
-            if name_lines[1]:
-                name_lines = (name_lines[0] + " /", name_lines[2])
-            else:
-                name_lines = name.split(None, 1)
-        else:
-            name_lines = [name]
+        name_lines = [name]
 
         for linenum, line in enumerate(name_lines):
             h = textHeight
-            if tooLong and len(name_lines) > 1:
-                if linenum == 0:
-                    h += h / 2
-                else:
-                    h -= h / 2
 
             words = line.split()
             NotRightEdge = not self.options.tab_name_align == "right" and (
@@ -1291,11 +1276,11 @@ class DividerDrawer(object):
                     w = textInset
 
                 def drawWordPiece(text, fontSize):
-                    self.canvas.setFont(self.font_mapping["Regular"], fontSize)
+                    self.canvas.setFont(self.font_mapping["Bold"], fontSize)
                     if text != " ":
                         self.canvas.drawString(w, h, text)
                     return pdfmetrics.stringWidth(
-                        text, self.font_mapping["Regular"], fontSize
+                        text, self.font_mapping["Bold"], fontSize
                     )
 
                 for i, word in enumerate(words):
@@ -1388,21 +1373,8 @@ class DividerDrawer(object):
         # Add 'body-top' items
         drewTopIcon = False
         Image_x_left = 4
-        if "body-top" in self.options.cost and not card.isExpansion():
-            Image_x_left += self.drawCost(
-                card, Image_x_left, totalHeight - usedHeight - 0.5 * cm
-            )
-            drewTopIcon = True
 
         Image_x_right = item.cardWidth - 4
-        if "body-top" in self.options.set_icon and not card.isExpansion():
-            setImage = card.setImage()
-            if setImage:
-                Image_x_right -= 16
-                self.drawSetIcon(
-                    setImage, Image_x_right, totalHeight - usedHeight - 0.5 * cm - 3
-                )
-                drewTopIcon = True
 
         if self.options.count:
             Image_x_right -= self.drawCardCount(
